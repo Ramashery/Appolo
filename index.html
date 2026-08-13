@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>ALMAREX — Matrix Touch</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    background: #000;
+    overflow: hidden;
+    position: fixed;
+    inset: 0;
+    touch-action: none;
+    overscroll-behavior: none;
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-touch-callout: none;
+  }
+
+  #stage {
+    position: fixed;
+    inset: 0;
+    width: 100vw;
+    height: 100vh;
+    overflow: hidden;
+    touch-action: none;
+    overscroll-behavior: none;
+  }
+
+  video {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    background: #000;
+    pointer-events: none;
+    -webkit-touch-callout: none;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
+  #matrixCanvas {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    background: #000;
+    opacity: 0;
+  }
+
+</style>
+</head>
+<body>
+
+<div id="stage">
+  <video
+    id="video"
+    src="https://res.cloudinary.com/drzhvmhqv/video/upload/neuro-network_afg2ls.mp4"
+    autoplay
+    loop
+    muted
+    playsinline
+    webkit-playsinline
+    crossorigin="anonymous"
+    disablePictureInPicture
+    disableRemotePlayback
+    controlsList="nodownload noplaybackrate nofullscreen noremoteplayback"
+    oncontextmenu="return false;"
+  ></video>
+  <canvas id="matrixCanvas"></canvas>
+</div>
+
+<script>
+(function () {
+  const video = document.getElementById('video');
+  const canvas = document.getElementById('matrixCanvas');
+  const ctx = canvas.getContext('2d', { alpha: false });
+  const stage = document.getElementById('stage');
+
+  // Offscreen low-res canvas used to sample video colors per character cell
+  const sampleCanvas = document.createElement('canvas');
+  const sampleCtx = sampleCanvas.getContext('2d', { willReadFrequently: true });
+
+  const CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
+  const CELL = 7; // px per character — small & dense, finer grid = more recognizable image
+
+  let W = 0, H = 0, cols = 0, rows = 0, dpr = Math.min(window.devicePixelRatio || 1, 2);
+  let chars = null;       // Uint8Array-ish index buffer into CHARS, per cell
+  let opacity = 0;        // current fade level of the matrix layer (ramps up once on load, then stays at 1)
+
+  function resize() {
+    W = window.innerWidth;
+    H = window.innerHeight;
+
+    canvas.width = W * dpr;
+    canvas.height = H * dpr;
+    canvas.style.width = W + 'px';
+    canvas.style.height = H + 'px';
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+    cols = Math.ceil(W / CELL);
+    rows = Math.ceil(H / CELL);
+
+    sampleCanvas.width = cols;
+    sampleCanvas.height = rows;
+
+    chars = new Array(cols * rows).fill(0).map(randCharIndex);
+  }
+
+  function randCharIndex() {
+    return (Math.random() * CHARS.length) | 0;
+  }
+
+  // Mirrors CSS `object-fit: cover` when sampling the video, so the
+  // letter-rendered image lines up exactly with the video crop shown on screen
+  // (fixes the picture looking squeezed on the sides while touching).
+  function getCoverSourceRect(srcW, srcH, dstW, dstH) {
+    const srcAspect = srcW / srcH;
+    const dstAspect = dstW / dstH;
+    let sx, sy, sw, sh;
+    if (srcAspect > dstAspect) {
+      sh = srcH;
+      sw = srcH * dstAspect;
+      sx = (srcW - sw) / 2;
+      sy = 0;
+    } else {
+      sw = srcW;
+      sh = srcW / dstAspect;
+      sx = 0;
+      sy = (srcH - sh) / 2;
+    }
+    return { sx, sy, sw, sh };
+  }
+
+  window.addEventListener('resize', resize);
+  resize();
+
+  // Block iOS Safari's rubber-band/elastic-scroll and pinch-zoom gestures.
+  // These are what causes the page to visually "shrink" during a long touch.
+  document.addEventListener('touchmove', (e) => e.preventDefault(), { passive: false });
+  document.addEventListener('gesturestart', (e) => e.preventDefault());
+  document.addEventListener('gesturechange', (e) => e.preventDefault());
+  document.addEventListener('dblclick', (e) => e.preventDefault());
+  document.addEventListener('contextmenu', (e) => e.preventDefault());
+  stage.addEventListener('contextmenu', (e) => e.preventDefault());
+
+  // --- Main loop ---
+  const FADE_SPEED = 0.18;     // opacity ramp per frame toward target
+  let frameCount = 0;
+
+  function draw() {
+    requestAnimationFrame(draw);
+    frameCount++;
+
+    const target = 1; // always fully visible — animation runs continuously
+    opacity += (target - opacity) * FADE_SPEED;
+    if (Math.abs(target - opacity) < 0.01) opacity = target;
+
+    canvas.style.opacity = opacity.toFixed(3);
+
+    if (opacity < 0.01) return; // nothing to draw, save cycles
+
+    if (video.readyState >= 2 && cols > 0 && rows > 0 && video.videoWidth && video.videoHeight) {
+      try {
+        const { sx, sy, sw, sh } = getCoverSourceRect(video.videoWidth, video.videoHeight, W, H);
+        sampleCtx.drawImage(video, sx, sy, sw, sh, 0, 0, cols, rows);
+      } catch (err) { /* transient decode error, skip frame */ }
+    }
+
+    let imgData = null;
+    try {
+      imgData = sampleCtx.getImageData(0, 0, cols, rows).data;
+    } catch (err) {
+      imgData = null;
+    }
+    if (!imgData) return;
+
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.font = 'bold ' + (CELL + 3) + 'px "Courier New", monospace';
+    ctx.textBaseline = 'top';
+
+    // reroll glyphs at a moderate pace so the underlying shape stays readable
+    const reroll = frameCount % 4 === 0;
+
+    for (let gy = 0; gy < rows; gy++) {
+      const y = gy * CELL;
+      for (let gx = 0; gx < cols; gx++) {
+        const cellIdx = gy * cols + gx;
+        const pi = cellIdx * 4;
+        const r = imgData[pi], g = imgData[pi + 1], b = imgData[pi + 2];
+
+        if (reroll || Math.random() < 0.1) {
+          chars[cellIdx] = randCharIndex();
+        }
+
+        ctx.fillStyle = 'rgb(' + r + ',' + g + ',' + b + ')';
+        ctx.fillText(CHARS[chars[cellIdx]], gx * CELL, y);
+      }
+    }
+  }
+
+  video.addEventListener('canplay', () => {
+    video.play().catch(() => {});
+  });
+
+  requestAnimationFrame(draw);
+})();
+</script>
+
+</body>
+</html>
